@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Panora Raf Asistanı</title>
-<meta name="panora-version" content="34">
+<meta name="panora-version" content="35">
 <style>
 :root{
   --bg:#F3F5F9; --surface:#FFFFFF; --ink:#141C2E; --muted:#5A6478; --line:#DCE1EA;
@@ -554,40 +554,56 @@ function bindWarranty(box,x,ws){
 /* ---------- AI helper: Google Gemini, called straight from the phone with the user's own key ---------- */
 const AI={
   key(){try{return localStorage.getItem('pra_gkey')||''}catch(e){return ''}},
-  setKey(k){try{k?localStorage.setItem('pra_gkey',k):localStorage.removeItem('pra_gkey');localStorage.removeItem('pra_gmodel')}catch(e){}},
-  async model(){
-    let m='';try{m=localStorage.getItem('pra_gmodel')||''}catch(e){}
-    if(m)return m;
-    const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':this.key()}});
+  setKey(k){try{k?localStorage.setItem('pra_gkey',k):localStorage.removeItem('pra_gkey');localStorage.removeItem('pra_gmodels');localStorage.removeItem('pra_gmodel')}catch(e){}},
+  // all text models this key can use, best first: stable "flash" models, then "flash-lite", then others
+  async models(){
+    try{const c=JSON.parse(localStorage.getItem('pra_gmodels')||'null');if(c&&Date.now()-c.at<24*3600e3&&c.list.length)return c.list}catch(e){}
+    const r=await fetchT('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':this.key()}},20000);
     if(!r.ok)throw await aiErr(r);
     const j=await r.json();
-    const ok=(j.models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent')).map(x=>x.name.replace(/^models\//,''));
-    // prefer a current stable "flash" model; fall back to anything that generates text
-    const score=n=>(/flash/.test(n)?100:0)+(/lite/.test(n)?-5:0)+(/preview|exp|thinking|image|tts|audio|live|embed/.test(n)?-50:0)+(parseFloat((n.match(/(\d+(\.\d+)?)/)||[])[1])||0);
-    m=ok.filter(n=>/^gemini/.test(n)).sort((a,b)=>score(b)-score(a))[0]||ok[0];
-    if(!m)throw new Error('Bu anahtarla kullanılabilen model bulunamadı.');
-    try{localStorage.setItem('pra_gmodel',m)}catch(e){}
-    return m;
+    const ok=(j.models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent')).map(x=>x.name.replace(/^models\//,'')).filter(n=>/^gemini/.test(n)&&!/image|tts|audio|live|embed|vision|robotics|computer/.test(n));
+    const ver=n=>parseFloat((n.match(/gemini-(\d+(\.\d+)?)/)||[])[1])||0;
+    const score=n=>(/flash/.test(n)?100:0)+(/lite/.test(n)?-8:0)+(/preview|exp/.test(n)?-40:0)+(/pro/.test(n)?-20:0)+ver(n)*3+(/latest/.test(n)?-1:0);
+    const list=[...new Set(ok)].sort((a,b)=>score(b)-score(a)).slice(0,6);
+    if(!list.length)throw new Error('Bu anahtarla kullanılabilen model bulunamadı.');
+    try{localStorage.setItem('pra_gmodels',JSON.stringify({at:Date.now(),list}))}catch(e){}
+    return list;
   },
-  async ask(prompt,signal){
+  async model(){const l=await this.models();let m='';try{m=localStorage.getItem('pra_gmodel')||''}catch(e){}return l.includes(m)?m:l[0]},
+  async ask(prompt,onStatus){
     if(!this.key())throw new Error('nokey');
-    const m=await this.model();
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',signal,
-      headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
-      body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{temperature:0.5,maxOutputTokens:1400}})});
-    if(!r.ok)throw await aiErr(r);
-    const j=await r.json();
-    const t=((((j.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join('').trim();
-    if(!t)throw new Error('Yapay zekâ boş cevap döndü, tekrar dene.');
-    return t;
+    const list=await this.models();let pref='';try{pref=localStorage.getItem('pra_gmodel')||''}catch(e){}
+    const order=[...new Set([pref,...list].filter(m=>m&&list.includes(m)))];
+    let last=null;
+    for(let i=0;i<Math.min(order.length,4);i++){
+      const m=order[i];if(i&&onStatus)onStatus(`Yoğunluk var, başka modelle deneniyor (${m})…`);
+      for(const thinkOff of [true,false]){
+        const gc={temperature:0.5,maxOutputTokens:1400};if(thinkOff&&/2\.5-flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
+        let r;
+        try{r=await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',
+          headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
+          body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc})},45000)}
+        catch(e){last=new Error(e.name==='AbortError'?'Yapay zekâ 45 saniyede cevap vermedi.':'Yapay zekâya bağlanılamadı. İnternetini kontrol et.');break}
+        if(r.ok){const j=await r.json();const t=((((j.candidates||[])[0]||{}).content||{}).parts||[]).filter(p=>!p.thought).map(p=>p.text||'').join('').trim();
+          if(t){try{localStorage.setItem('pra_gmodel',m)}catch(e){}return t}last=new Error('Yapay zekâ boş cevap döndü, tekrar dene.');break}
+        if(r.status===400&&gc.thinkingConfig){continue} // model rejects the thinking setting: retry without it
+        last=await aiErr(r);
+        if(r.status===400||r.status===403)throw last; // bad key: other models won't help
+        break; // 429/500/503/404: try the next model
+      }
+      await sleep(800);
+    }
+    throw last||new Error('Yapay zekâya ulaşılamadı.');
   }
 };
+function fetchT(url,opt,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);return fetch(url,Object.assign({},opt,{signal:c.signal})).finally(()=>clearTimeout(t))}
 async function aiErr(r){
   let msg='';try{msg=((await r.json()).error||{}).message||''}catch(e){}
   if(r.status===400&&/key/i.test(msg))return new Error('API anahtarı geçersiz. Ayarlardan kontrol et.');
   if(r.status===403)return new Error('Bu anahtarın Gemini’ye erişimi yok. Ayarlardan kontrol et.');
   if(r.status===429)return new Error('Gemini’nin ücretsiz kullanım sınırı doldu. Biraz sonra (günlük sınırsa yarın) tekrar dene.');
-  if(r.status===404){try{localStorage.removeItem('pra_gmodel')}catch(e){}return new Error('Model bulunamadı, tekrar dene.')}
+  if(r.status===503||r.status===500||r.status===504)return new Error('Google’ın yapay zekâ sunucuları şu an çok yoğun ('+r.status+'). Birkaç dakika sonra tekrar dene.');
+  if(r.status===404){try{localStorage.removeItem('pra_gmodels')}catch(e){}return new Error('Model bulunamadı, tekrar dene.')}
   return new Error('Yapay zekâya ulaşılamadı ('+r.status+').');
 }
 const AI_RULES=`Sen Teknosa Ankara Panora mağazasında çalışan bir satış danışmanının yardımcısısın. Danışman cevabını telefondan okuyup müşteriye kendi ağzıyla anlatacak.
@@ -609,11 +625,12 @@ function aiBlock(box,label,build){
   const go=box.querySelector('[data-aigo]');if(!go)return;
   go.onclick=async ev=>{ev.stopPropagation();const out=box.querySelector('[data-aiout]');go.disabled=true;
     out.innerHTML='<div class="loading"><span class="spin"></span>Yapay zekâ yazıyor…</div>';
-    try{const t=await AI.ask(await build());out.innerHTML=`<div class="panel" style="padding:12px;gap:6px;margin-top:8px;font-size:15px">${md(t)}<button class="btn btn-ghost" data-aicopy type="button" style="justify-self:start;min-height:36px;font-size:13px">Kopyala</button></div>`;
+    const t0=Date.now();const tick=setInterval(()=>{const l=out.querySelector('.loading');if(l&&!l.dataset.custom)l.lastChild.textContent=`Yapay zekâ yazıyor… ${Math.round((Date.now()-t0)/1000)} sn`},1000);
+    try{const t=await AI.ask(await build(),m=>{const l=out.querySelector('.loading');if(l){l.dataset.custom=1;l.lastChild.textContent=m}});out.innerHTML=`<div class="panel" style="padding:12px;gap:6px;margin-top:8px;font-size:15px">${md(t)}<button class="btn btn-ghost" data-aicopy type="button" style="justify-self:start;min-height:36px;font-size:13px">Kopyala</button></div>`;
       out.querySelector('[data-aicopy]').onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(t);toast('Kopyalandı')}catch(_){toast('Kopyalanamadı')}};
       go.textContent='✦ Yeniden yaz'}
     catch(e){out.innerHTML=`<p class="note" style="margin-top:8px">${esc(e.message==='nokey'?'Önce Gemini anahtarını ekle.':e.message)}</p>`}
-    finally{go.disabled=false}};
+    finally{clearInterval(tick);go.disabled=false}};
 }
 /* ---------- TeknoGaranti with AI (no online prices: store prices differ) ---------- */
 const TG_FACTS=`TeknoGaranti paketleri (Teknosa'nın resmi sayfasındaki kapsam):
@@ -961,7 +978,7 @@ function aiStateText(){const k=AI.key();let m='';try{m=localStorage.getItem('pra
 $('#verTag').onclick=()=>{verInfo();aiStateText();$('#sheet').hidden=false};
 $('#aiKey').onkeydown=e=>{if(e.key==='Enter')$('#aiSave').click()};
 $('#aiSave').onclick=async()=>{const k=$('#aiKey').value.trim();if(!k){toast('Önce anahtarı yapıştır');return}AI.setKey(k);$('#aiState').textContent='Deneniyor…';
-  try{const m=await AI.model();aiStateText();toast('Yapay zekâ hazır ('+m+')')}catch(e){$('#aiState').textContent=e.message}};
+  try{const m=await AI.model();try{localStorage.setItem('pra_gmodel',m)}catch(e){}aiStateText();toast('Yapay zekâ hazır ('+m+')')}catch(e){$('#aiState').textContent=e.message}};
 $('#aiDel').onclick=()=>{AI.setKey('');aiStateText();toast('Anahtar silindi')};
 $('#closeSheet').onclick=()=>$('#sheet').hidden=true;
 $('#sheet').onclick=e=>{if(e.target.id==='sheet')$('#sheet').hidden=true};
