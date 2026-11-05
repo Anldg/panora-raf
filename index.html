@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Panora Raf Asistanı</title>
-<meta name="panora-version" content="32">
+<meta name="panora-version" content="33">
 <style>
 :root{
   --bg:#F3F5F9; --surface:#FFFFFF; --ink:#141C2E; --muted:#5A6478; --line:#DCE1EA;
@@ -275,13 +275,26 @@ async function parseSearch(qs,page,signal){
 }
 // stock answers survive an app restart for 10 minutes
 const STOCK_TTL=15*60*1000;
+let csrfP=null;
+function csrfToken(force){
+  if(window.__csrf&&!force)return Promise.resolve(window.__csrf);
+  if(!csrfP||force)csrfP=tk('/sepet').then(r=>r.text()).then(t=>{const m=t.match(/CSRFToken\s*[=:]\s*["']([^"']+)["']/);window.__csrf=m?m[1]:'';return window.__csrf}).catch(()=>'').finally(()=>{setTimeout(()=>{csrfP=null},0)});
+  return csrfP;
+}
 const stockCache=new Map(Object.entries(store.get('stock',{})).filter(([k,v])=>Date.now()-v.at<STOCK_TTL)); // id -> {s, at}
 let saveT;function saveStock(){clearTimeout(saveT);saveT=setTimeout(()=>{const o={};stockCache.forEach((v,k)=>{if(Date.now()-v.at<STOCK_TTL)o[k]=v});store.set('stock',o)},1000)}
 async function stockOf(id,signal){
   const c=stockCache.get(id);if(c&&Date.now()-c.at<STOCK_TTL)return c.s;
   const body=new URLSearchParams({citycode:CITY,townCode:TOWN,cartPage:'false',entryNumber:'0',latitude:'',longitude:'',isAvailableStores:'true',isFindInStore:'true'});
-  const r=await tk('/store-pickup/'+id+'/city/pointOfServices',{method:'POST',body,signal,headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','CSRFToken':window.__csrf||csrf()}});
-  const j=JSON.parse(await r.text());
+  // Teknosa answers this request only with the session's CSRF token; without it an HTML page comes back
+  let j=null;
+  for(let a=0;a<2&&!j;a++){
+    const tok=await csrfToken(a>0);
+    const r=await tk('/store-pickup/'+id+'/city/pointOfServices',{method:'POST',body,signal,headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','CSRFToken':tok}});
+    const t=await r.text();
+    try{j=JSON.parse(t)}catch(e){const m=t.match(/CSRFToken\s*[=:]\s*["']([^"']+)["']/);if(m)window.__csrf=m[1]}
+  }
+  if(!j)throw new Error('fail');
   const s=(j.data||[]).find(x=>String(x.name)===STORE_CODE);
   const ss=s?String(s.storeStockStatus||''):'';// Panora listed: inStock -> var; runningOut/low -> az kaldı (marketplace-only items are forced to 'none' later)
   const st=!s?'none':(ss==='inStock'?'inStock':(/low|runningOut|few/i.test(ss)?'lowStock':'none'));
