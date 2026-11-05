@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Panora Raf Asistanı</title>
-<meta name="panora-version" content="33">
+<meta name="panora-version" content="34">
 <style>
 :root{
   --bg:#F3F5F9; --surface:#FFFFFF; --ink:#141C2E; --muted:#5A6478; --line:#DCE1EA;
@@ -190,6 +190,10 @@ ul.diffs{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
     <h3>Uygulama</h3>
     <p id="verInfo" style="font-size:15px"></p>
     <p class="muted" style="font-size:13px">Yeni sürümler GitHub’daki panora-raf deposundan otomatik indirilir; uygulama açılınca kontrol edilir.</p>
+    <h3 style="margin-top:6px">Yapay zekâ (Google Gemini)</h3>
+    <p class="muted" style="font-size:13px" id="aiState"></p>
+    <input type="password" id="aiKey" placeholder="Gemini API anahtarını yapıştır" autocomplete="off" spellcheck="false" style="font-size:15px">
+    <div class="row"><button class="btn btn-dark" id="aiSave" type="button">Anahtarı kaydet ve dene</button><button class="btn btn-ghost" id="aiDel" type="button">Sil</button></div>
     <div class="row"><button class="btn btn-primary" id="chkUpd" type="button">Güncellemeleri kontrol et</button><button class="btn btn-ghost" id="closeSheet" type="button">Kapat</button></div>
     <button class="btn btn-ghost" id="resetUpd" type="button" style="font-size:13px;min-height:36px">İndirilen sürümü sil (APK’daki sürüme dön)</button>
   </div>
@@ -231,7 +235,7 @@ async function tk(url,opt={},tries=2){
     let r;try{r=await fetch(url,opt)}catch(e){if(opt.signal&&opt.signal.aborted)throw e;await sleep(600);continue}
     if(r.status===429){cdHits++;const secs=Math.min(120,20*cdHits);cooldownUntil=Date.now()+secs*1000;toast(`Teknosa yavaşlamamızı istedi, ${secs} sn sonra kendiliğinden devam edecek`);setTimeout(pumpStock,secs*1000+200);throw new Error('429')}
     cdHits=Math.max(0,cdHits-0.1);
-    if(r.status===403&&i===0){warm=null;await warmUp();continue}
+    if(r.status===403&&i===0){await csrfToken(true);continue}
     if(r.ok)return r;
     await sleep(500);
   }
@@ -547,6 +551,149 @@ function bindWarranty(box,x,ws){
     if(ob){e.stopPropagation();box.querySelectorAll('[data-obj]').forEach(b=>b.style.cssText='');ob.style.cssText='background:var(--ink);color:var(--bg)';const a=box.querySelector('[data-objans]');a.hidden=false;a.textContent='“'+OBJ[+ob.dataset.obj][1]+'”'}
   });
 }
+/* ---------- AI helper: Google Gemini, called straight from the phone with the user's own key ---------- */
+const AI={
+  key(){try{return localStorage.getItem('pra_gkey')||''}catch(e){return ''}},
+  setKey(k){try{k?localStorage.setItem('pra_gkey',k):localStorage.removeItem('pra_gkey');localStorage.removeItem('pra_gmodel')}catch(e){}},
+  async model(){
+    let m='';try{m=localStorage.getItem('pra_gmodel')||''}catch(e){}
+    if(m)return m;
+    const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':this.key()}});
+    if(!r.ok)throw await aiErr(r);
+    const j=await r.json();
+    const ok=(j.models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent')).map(x=>x.name.replace(/^models\//,''));
+    // prefer a current stable "flash" model; fall back to anything that generates text
+    const score=n=>(/flash/.test(n)?100:0)+(/lite/.test(n)?-5:0)+(/preview|exp|thinking|image|tts|audio|live|embed/.test(n)?-50:0)+(parseFloat((n.match(/(\d+(\.\d+)?)/)||[])[1])||0);
+    m=ok.filter(n=>/^gemini/.test(n)).sort((a,b)=>score(b)-score(a))[0]||ok[0];
+    if(!m)throw new Error('Bu anahtarla kullanılabilen model bulunamadı.');
+    try{localStorage.setItem('pra_gmodel',m)}catch(e){}
+    return m;
+  },
+  async ask(prompt,signal){
+    if(!this.key())throw new Error('nokey');
+    const m=await this.model();
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',signal,
+      headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
+      body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{temperature:0.5,maxOutputTokens:1400}})});
+    if(!r.ok)throw await aiErr(r);
+    const j=await r.json();
+    const t=((((j.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join('').trim();
+    if(!t)throw new Error('Yapay zekâ boş cevap döndü, tekrar dene.');
+    return t;
+  }
+};
+async function aiErr(r){
+  let msg='';try{msg=((await r.json()).error||{}).message||''}catch(e){}
+  if(r.status===400&&/key/i.test(msg))return new Error('API anahtarı geçersiz. Ayarlardan kontrol et.');
+  if(r.status===403)return new Error('Bu anahtarın Gemini’ye erişimi yok. Ayarlardan kontrol et.');
+  if(r.status===429)return new Error('Gemini’nin ücretsiz kullanım sınırı doldu. Biraz sonra (günlük sınırsa yarın) tekrar dene.');
+  if(r.status===404){try{localStorage.removeItem('pra_gmodel')}catch(e){}return new Error('Model bulunamadı, tekrar dene.')}
+  return new Error('Yapay zekâya ulaşılamadı ('+r.status+').');
+}
+const AI_RULES=`Sen Teknosa Ankara Panora mağazasında çalışan bir satış danışmanının yardımcısısın. Danışman cevabını telefondan okuyup müşteriye kendi ağzıyla anlatacak.
+Kurallar: Türkçe yaz. Samimi, doğal konuşma dili kullan, broşür gibi değil. Kısa tut. Sana verilmeyen bilgiyi uydurma; emin olmadığın teknik değer yazma. Başlıkları "## " ile, maddeleri "- " ile yaz; başka biçimlendirme kullanma.`;
+function md(t){ // tiny formatter for the AI answer: ## headings, - bullets, **bold**
+  const lines=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').split('\n');let h='',inUl=false;
+  for(const l of lines){const m=l.match(/^\s*[-•*]\s+(.*)/);
+    if(m){if(!inUl){h+='<ul class="diffs">';inUl=true}h+=`<li>${m[1]}</li>`;continue}
+    if(inUl){h+='</ul>';inUl=false}
+    const hm=l.match(/^\s*#{1,4}\s*(.*)/);if(hm){h+=`<h3 style="margin-top:8px">${hm[1]}</h3>`;continue}
+    if(l.trim())h+=`<p>${l}</p>`;}
+  if(inUl)h+='</ul>';return h;
+}
+// renders an "ask AI" block into box; build() returns the prompt
+function aiBlock(box,label,build){
+  const has=!!AI.key();
+  box.innerHTML=has?`<button class="btn btn-dark" data-aigo type="button" style="width:100%">✦ ${esc(label)}</button><div data-aiout></div>`
+    :`<p class="muted" style="font-size:13px">Yapay zekâ için üstteki sarı etikete dokun ve Gemini anahtarını ekle.</p>`;
+  const go=box.querySelector('[data-aigo]');if(!go)return;
+  go.onclick=async ev=>{ev.stopPropagation();const out=box.querySelector('[data-aiout]');go.disabled=true;
+    out.innerHTML='<div class="loading"><span class="spin"></span>Yapay zekâ yazıyor…</div>';
+    try{const t=await AI.ask(await build());out.innerHTML=`<div class="panel" style="padding:12px;gap:6px;margin-top:8px;font-size:15px">${md(t)}<button class="btn btn-ghost" data-aicopy type="button" style="justify-self:start;min-height:36px;font-size:13px">Kopyala</button></div>`;
+      out.querySelector('[data-aicopy]').onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(t);toast('Kopyalandı')}catch(_){toast('Kopyalanamadı')}};
+      go.textContent='✦ Yeniden yaz'}
+    catch(e){out.innerHTML=`<p class="note" style="margin-top:8px">${esc(e.message==='nokey'?'Önce Gemini anahtarını ekle.':e.message)}</p>`}
+    finally{go.disabled=false}};
+}
+/* ---------- TeknoGaranti with AI (no online prices: store prices differ) ---------- */
+const TG_FACTS=`TeknoGaranti paketleri (Teknosa'nın resmi sayfasındaki kapsam):
+- TeknoGaranti (en kapsamlı): 1 yıl ekran kırılması, kazaen hasar, sıvı teması, zorla/tehditle hırsızlık; 2 yıl nem-toz ve yüksek voltaj arızası; üretici garantisini 3 yıla kadar uzatır; garanti sonrası üretim hatasında 1 kez pil/batarya değişimi.
+- Koruma Sigortası: 1 yıl ekran kırılması, kazaen hasar, sıvı teması, zorla/tehditle hırsızlık; onarım fatura bedelinin %65'ine kadar. Telefon ve tablette; mağazada telefona 2 yıllık seçenek de var.
+- +1 Yıl Ek Garanti: üretici garantisi bitince 1 yıl daha, üretim kaynaklı arızalar, cihaz bedelinin tamamına kadar onarım. Beyaz eşya, TV, küçük ev aletlerinde.
+Koşullar: kaza ve hırsızlıkta ödeme/onarım ürün bedelinin %65'ine kadar; hırsızlık sadece zorla veya tehditle olursa geçerli, kayıp ve fark etmeden çalınma (yankesicilik) kapsam dışı; paket ürünle aynı faturada satılır; telefonda TeknoGaranti sonradan sadece ilk 6 ay içinde ve sadece mağazadan alınabilir; teminatı Aksigorta verir.`;
+function renderTG(box,x){
+  const ck=catKind(x.c),K=KINDS[ck];
+  box.innerHTML=`<div class="tg" style="display:grid;gap:10px">
+    <div class="pitch" style="gap:8px"><h3>Önce sor</h3><p>“${esc(K.ask)}”</p>
+      <span style="font-size:13px;opacity:.8">Müşterinin durumu (birden fazla seçebilirsin):</span>
+      <div class="chips" style="flex-wrap:wrap">${K.prof.map(([k,l])=>`<button class="chip" data-tgp="${esc(l)}" type="button">${esc(l)}</button>`).join('')}</div>
+      <input type="text" data-tgnote placeholder="Müşteri ne dedi? (isteğe bağlı)" style="font-size:15px;background:rgba(255,255,255,.95);color:#141C2E">
+    </div>
+    <div data-tgai></div>
+    <details class="panel" style="padding:12px"><summary style="font-weight:600">Paketler ve koşullar</summary>
+      <div style="display:grid;gap:6px;margin-top:8px;font-size:13px">${md(TG_FACTS)}</div></details></div>`;
+  const sel=new Set();
+  box.querySelectorAll('[data-tgp]').forEach(b=>b.onclick=e=>{e.stopPropagation();const v=b.dataset.tgp;if(sel.has(v)){sel.delete(v);b.style.cssText=''}else{sel.add(v);b.style.cssText='background:var(--accent);color:var(--accent-ink)'}});
+  box.querySelector('[data-tgnote]').onclick=e=>e.stopPropagation();
+  aiBlock(box.querySelector('[data-tgai]'),'Yapay zekâ ile anlatım hazırla',()=>`${AI_RULES}
+
+Görev: Danışmanın bu müşteriye TeknoGaranti/ek garanti paketlerini anlatmasına yardım et. FİYAT YAZMA (mağaza fiyatları internetten farklı, fiyatı danışman söyleyecek). Sadece bu ürüne uygun paketleri öner; kapsam dışı bir şeyi kapsıyor gibi anlatma, koşulları dürüstçe hatırlat.
+Ürün: ${x.n}
+Kategori: ${x.c}
+Müşterinin durumu: ${[...sel].join(', ')||'belirtilmedi'}
+Müşterinin söylediği: ${box.querySelector('[data-tgnote]').value.trim()||'-'}
+
+${TG_FACTS}
+
+Şu başlıklarla yaz:
+## Önerilen paket
+(tek cümle: hangi paket ve neden bu müşteriye uygun)
+## Müşteriye söyle
+(2-4 cümle, bu ürünün gerçek risklerine ve müşterinin durumuna özel, konuşur gibi)
+## Kapanış
+(tek cümle)
+## İtiraz gelirse
+- "Zaten garantisi var" → cevap
+- "Pahalı" → cevap (fiyat rakamı yazmadan)
+- "Sonra alırım" → cevap
+- bu ürüne özel bir itiraz daha → cevap`);
+}
+function specsPrompt(x,sp){return `${AI_RULES}
+
+Görev: Aşağıdaki ürünün teknik özelliklerini müşteriye anlatılacak şekilde açıkla. Sadece listedeki değerleri kullan.
+Ürün: ${x.n} — ${x.c}${x.p?` — Teknosa fiyatı ${TL(x.p)}`:''}
+Özellikler:
+${sp.map(s=>`- ${s.k}: ${s.v}`).join('\n')}
+
+Şu başlıklarla yaz:
+## Kısaca
+(1-2 cümle: bu ürün ne, kime uygun)
+## Öne çıkan 4-5 özellik
+- özellik: müşteriye ne kazandırır (teknik terimi basitçe açıkla)
+## Dikkat edilecekler
+- bu üründe olmayan ya da sınırlı olan, müşterinin sorabileceği 1-3 nokta
+## Müşteriye söyle
+(2-3 cümle, konuşur gibi)`}
+function cmpPrompt(prods,specs,stocks){
+  const keys=[];const seen=new Set();specs.forEach(sp=>sp.forEach(s=>{if(!seen.has(s.k)){seen.add(s.k);keys.push(s.k)}}));
+  const rows=keys.map(k=>`- ${k}: ${prods.map((p,i)=>{const f=specs[i].find(s=>s.k===k);return `${'ABC'[i]}=${f?f.v:'?'}`}).join(' | ')}`).join('\n');
+  return `${AI_RULES}
+
+Görev: Müşteri bu ürünler arasında kararsız. Danışmana hangi ürünün kime daha uygun olduğunu anlat. Sadece verilen değerleri kullan; sayısal fark önemsizse abartma (ör. 4 g ağırlık farkı).
+${prods.map((p,i)=>`${'ABC'[i]}: ${p.n} — fiyat ${p.p?TL(p.p):'bilinmiyor'} — Panora stok: ${({inStock:'var',lowStock:'az kaldı',none:'yok',err:'bilinmiyor'})[stocks[i]]||'bilinmiyor'}`).join('\n')}
+Özellikler (A | B${prods.length>2?' | C':''}):
+${rows}
+
+Şu başlıklarla yaz:
+## Kısaca
+(2 cümle: temel fark ve fiyat farkı neye karşılık geliyor)
+## Hangisi kime
+- ${prods.map((_,i)=>'ABC'[i]).join(' / ')}: kime uygun, tek cümle
+## Gerçekten önemli farklar
+- en fazla 4 madde
+## Müşteriye söyle
+(2-3 cümle, konuşur gibi, stokta olmayan ürünü önerme)`;
+}
 function renderList(){
   const box=$('#results');
   if(!term){
@@ -641,14 +788,13 @@ $('#results').addEventListener('click',async e=>{
     return;
   }
   if(act&&act.dataset.act==='tg'){
-    const box=it.querySelector('[data-tg]');box.innerHTML='<div class="loading"><span class="spin"></span>Garanti paketleri alınıyor…</div>';
-    try{const w=await warrantyOf(x);box.innerHTML=renderWarranty(x,w);bindWarranty(box,x,w)}
-    catch(e){box.innerHTML='<p class="muted">Garanti paketleri alınamadı. Bağlantını kontrol et.</p>'}
-    return;
+    const box=it.querySelector('[data-tg]');if(box.innerHTML){box.innerHTML='';return}
+    renderTG(box,x);return;
   }
   if(act&&act.dataset.act==='spec'){
     const box=it.querySelector('[data-specs]');box.innerHTML='<div class="loading"><span class="spin"></span>Özellikler alınıyor…</div>';
-    try{const sp=await specsOf(x.id);box.innerHTML=sp.length?`<dl class="specs">${sp.map(s=>`<dt>${esc(s.k)}</dt><dd>${esc(s.v)}</dd>`).join('')}</dl>`:'<p class="muted">Bu ürün için özellik bilgisi yok.</p>'}
+    try{const sp=await specsOf(x.id);box.innerHTML=sp.length?`<div data-specai style="margin-bottom:8px"></div><dl class="specs">${sp.map(s=>`<dt>${esc(s.k)}</dt><dd>${esc(s.v)}</dd>`).join('')}</dl>`:'<p class="muted">Bu ürün için özellik bilgisi yok.</p>';
+      if(sp.length)aiBlock(box.querySelector('[data-specai]'),'Yapay zekâ ile açıkla',()=>specsPrompt(x,sp))}
     catch(e){box.innerHTML='<p class="muted">Özellikler alınamadı.</p>'}
     return;
   }
@@ -783,10 +929,11 @@ function renderCmp({prods,specs,stocks}){
   const warn=cats.size>1?`<p class="note">Bu ürünler farklı kategorilerde; ortak özellik az olabilir.</p>`:'';
   const ours=`<tr class="ours"><th scope="row">Fiyat</th>${prods.map(p=>`<td>${TL(p.p)}</td>`).join('')}</tr>
     <tr class="ours"><th scope="row">Panora stok</th>${stocks.map(s=>`<td><span class="st ${ST[s][0]}">${ST[s][1]}</span></td>`).join('')}</tr>`;
-  $('#result').innerHTML=`<div style="display:grid;gap:16px">${talkTrack(prods,specs,stocks)}<div class="panel">${warn}
+  $('#result').innerHTML=`<div style="display:grid;gap:16px"><div data-cmpai></div>${talkTrack(prods,specs,stocks)}<div class="panel">${warn}
     <div class="tbl-wrap"><table><thead><tr><th></th>${prods.map((p,i)=>`<th>${L[i]} · ${esc(p.n.length>28?p.n.slice(0,27)+'…':p.n)}</th>`).join('')}</tr></thead>
     <tbody>${ours}${rows||`<tr><td colspan="${prods.length+1}" class="muted">Farklı özellik bulunamadı.</td></tr>`}</tbody></table></div>
     <p class="muted" style="font-size:12px">Değerler Teknosa’nın ürün sayfalarından. ${diffCount} özellik farklı. Sarı satırlar farklı; ▲ sayısal olarak yüksek olan.</p></div></div>`;
+  aiBlock($('[data-cmpai]'),'Yapay zekâ değerlendirmesi',()=>cmpPrompt(prods,specs,stocks));
   const cp=$('#copyPitch');if(cp)cp.onclick=async()=>{const t=$('#pitchText').textContent;try{await navigator.clipboard.writeText(t);toast('Kopyalandı')}catch(e){const r=document.createRange();r.selectNodeContents($('#pitchText'));const sel=getSelection();sel.removeAllRanges();sel.addRange(r);toast('Metni seçtim, kopyala')}};
 }
 function renderHist(){
@@ -810,7 +957,12 @@ async function checkUpdate(manual){
 }
 function showUpdate(v){const el=$('#toast');el.innerHTML=`Yeni sürüm hazır (${verText(v)}) · <u>Şimdi yenile</u>`;el.hidden=false;clearTimeout(toast.t);el.onclick=()=>location.reload()}
 $('#verTag').textContent='canlı stok · '+verText(myVer);
-$('#verTag').onclick=()=>{verInfo();$('#sheet').hidden=false};
+function aiStateText(){const k=AI.key();let m='';try{m=localStorage.getItem('pra_gmodel')||''}catch(e){}$('#aiState').textContent=k?`Anahtar kayıtlı (…${k.slice(-4)})${m?' · model: '+m:''}.`:'Anahtar yok. aistudio.google.com → Get API key ile ücretsiz alıp buraya yapıştır.';$('#aiKey').value=''}
+$('#verTag').onclick=()=>{verInfo();aiStateText();$('#sheet').hidden=false};
+$('#aiKey').onkeydown=e=>{if(e.key==='Enter')$('#aiSave').click()};
+$('#aiSave').onclick=async()=>{const k=$('#aiKey').value.trim();if(!k){toast('Önce anahtarı yapıştır');return}AI.setKey(k);$('#aiState').textContent='Deneniyor…';
+  try{const m=await AI.model();aiStateText();toast('Yapay zekâ hazır ('+m+')')}catch(e){$('#aiState').textContent=e.message}};
+$('#aiDel').onclick=()=>{AI.setKey('');aiStateText();toast('Anahtar silindi')};
 $('#closeSheet').onclick=()=>$('#sheet').hidden=true;
 $('#sheet').onclick=e=>{if(e.target.id==='sheet')$('#sheet').hidden=true};
 $('#chkUpd').onclick=()=>{$('#sheet').hidden=true;checkUpdate(true)};
