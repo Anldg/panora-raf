@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Panora Raf Asistanı</title>
-<meta name="panora-version" content="36">
+<meta name="panora-version" content="37">
 <style>
 :root{
   --bg:#F3F5F9; --surface:#FFFFFF; --ink:#141C2E; --muted:#5A6478; --line:#DCE1EA;
@@ -593,6 +593,14 @@ const AI={
     try{localStorage.setItem('pra_gmodels',JSON.stringify({at:Date.now(),list}))}catch(e){}
     return list;
   },
+  async call(m,contents,gc){
+    const r=await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',
+      headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
+      body:JSON.stringify({contents,generationConfig:gc})},45000);
+    if(!r.ok)return {status:r.status,err:await aiErr(r)};
+    const j=await r.json();const c=(j.candidates||[])[0]||{};
+    return {text:((c.content||{}).parts||[]).filter(p=>!p.thought).map(p=>p.text||'').join(''),finish:c.finishReason||'STOP'};
+  },
   async model(){const l=await this.models();let m='';try{m=localStorage.getItem('pra_gmodel')||''}catch(e){}return l.includes(m)?m:l[0]},
   async ask(prompt,onStatus){
     if(!this.key())throw new Error('nokey');
@@ -602,18 +610,21 @@ const AI={
     for(let i=0;i<Math.min(order.length,4);i++){
       const m=order[i];if(i&&onStatus)onStatus(`Yoğunluk var, başka modelle deneniyor (${m})…`);
       for(const thinkOff of [true,false]){
-        const gc={temperature:0.7,maxOutputTokens:2000};if(thinkOff&&/2\.5-flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
-        let r;
-        try{r=await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',
-          headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
-          body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc})},45000)}
+        // thinking tokens count against the output limit and can cut answers short: switch thinking off where allowed
+        const gc={temperature:0.7,maxOutputTokens:8192};if(thinkOff&&/flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
+        let res;
+        try{res=await this.call(m,[{role:'user',parts:[{text:prompt}]}],gc)}
         catch(e){last=new Error(e.name==='AbortError'?'Yapay zekâ 45 saniyede cevap vermedi.':'Yapay zekâya bağlanılamadı. İnternetini kontrol et.');break}
-        if(r.ok){const j=await r.json();const t=((((j.candidates||[])[0]||{}).content||{}).parts||[]).filter(p=>!p.thought).map(p=>p.text||'').join('').trim();
-          if(t){try{localStorage.setItem('pra_gmodel',m)}catch(e){}return t}last=new Error('Yapay zekâ boş cevap döndü, tekrar dene.');break}
-        if(r.status===400&&gc.thinkingConfig){continue} // model rejects the thinking setting: retry without it
-        last=await aiErr(r);
-        if(r.status===400||r.status===403)throw last; // bad key: other models won't help
-        break; // 429/500/503/404: try the next model
+        if(res.err){if(res.status===400&&gc.thinkingConfig)continue;last=res.err;if(res.status===400||res.status===403)throw last;break}
+        let {text,finish}=res;
+        // answer stopped early (length limit or a filter): ask the model to continue from where it stopped, up to twice
+        for(let k=0;k<2&&text&&finish&&finish!=='STOP';k++){
+          if(onStatus)onStatus('Cevap uzun, devamı alınıyor…');
+          let more;try{more=await this.call(m,[{role:'user',parts:[{text:prompt}]},{role:'model',parts:[{text}]},{role:'user',parts:[{text:'Cevabın yarıda kesildi. Kaldığın yerden, tekrar etmeden ve aynı biçimde devam et.'}]}],gc)}catch(e){break}
+          if(more.err||!more.text)break;text+=(/[\s\n]$/.test(text)||/^[\s\n,.;:]/.test(more.text)?'':'')+more.text;finish=more.finish;
+        }
+        if(text){try{localStorage.setItem('pra_gmodel',m)}catch(e){}return finish&&finish!=='STOP'&&finish!=='MAX_TOKENS'?text+'\n\n(Cevap tamamlanamadı, “Yeniden yaz” ile tekrar dene.)':text}
+        last=new Error('Yapay zekâ boş cevap döndü, tekrar dene.');break;
       }
       await sleep(800);
     }
