@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Panora Raf Asistanı</title>
-<meta name="panora-version" content="35">
+<meta name="panora-version" content="36">
 <style>
 :root{
   --bg:#F3F5F9; --surface:#FFFFFF; --ink:#141C2E; --muted:#5A6478; --line:#DCE1EA;
@@ -118,7 +118,7 @@ tr.sec th{background:var(--bg);color:var(--ink);font-family:var(--f-display);fon
 ul.diffs{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
 /* tabs */
 .tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
-.tabs-in{max-width:640px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr}
+.tabs-in{max-width:640px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr 1fr}
 .tab{all:unset;display:grid;justify-items:center;gap:2px;padding:9px 0 11px;font-size:12px;font-weight:600;color:var(--muted);position:relative}
 .tab svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.8}
 .tab[aria-selected="true"]{color:var(--ink)}
@@ -126,6 +126,7 @@ ul.diffs{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
 .tab .badge{position:absolute;top:5px;left:calc(50% + 10px);background:var(--accent);color:var(--accent-ink);font-family:var(--f-mono);font-size:10px;border-radius:999px;padding:0 5px;line-height:16px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(80px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:14px;z-index:9;max-width:90vw;text-align:center}
 [hidden]{display:none!important}
+.codeview .item.hide{display:block}
 </style>
 </head>
 <body>
@@ -154,6 +155,19 @@ ul.diffs{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
     <button class="btn btn-ghost showmore" id="more" type="button" hidden>Daha fazla ürün yükle</button>
   </section>
 
+  <section id="view-kod" hidden>
+    <div class="pad">
+      <h2>Ürün koduyla stok</h2>
+      <form class="panel" id="codeForm" autocomplete="off">
+        <label for="codeIn" style="font-size:13px;font-weight:600;color:var(--muted)">Ürün kodu (ör. 100000065149 ya da 125079197)</label>
+        <input type="text" id="codeIn" inputmode="numeric" pattern="[0-9]*" placeholder="100000…" style="font-family:var(--f-mono);font-size:22px;letter-spacing:.04em">
+        <button class="btn btn-primary" type="submit" id="codeGo">Sorgula</button>
+      </form>
+      <div id="codeResult"></div>
+      <div id="codeHistWrap" hidden><h3 style="margin-bottom:8px">Son sorgular</h3><div class="hist" id="codeHist"></div></div>
+    </div>
+  </section>
+
   <section id="view-kiyas" hidden>
     <div class="pad">
       <h2>Karşılaştır</h2>
@@ -178,6 +192,9 @@ ul.diffs{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
   <div class="tabs-in">
     <button class="tab" id="tab-ara" aria-selected="true">
       <svg viewBox="0 0 24 24"><path d="M3 9l1.5-5h15L21 9M3 9h18M3 9v11h18V9M9 20v-6h6v6"/></svg>Ara · Stok
+    </button>
+    <button class="tab" id="tab-kod" aria-selected="false">
+      <svg viewBox="0 0 24 24"><path d="M4 6v12M7 6v12M10 6v12M14 6v12M16 6v12M20 6v12"/></svg>Kodla sor
     </button>
     <button class="tab" id="tab-kiyas" aria-selected="false">
       <svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h4M5 7l-2.5 6a3 3 0 0 0 5 0L5 7zM19 7h-4M19 7l-2.5 6a3 3 0 0 0 5 0L19 7zM8 21h8"/></svg>Karşılaştır<span class="badge" id="cmpBadge" hidden></span>
@@ -287,9 +304,11 @@ function csrfToken(force){
 }
 const stockCache=new Map(Object.entries(store.get('stock',{})).filter(([k,v])=>Date.now()-v.at<STOCK_TTL)); // id -> {s, at}
 let saveT;function saveStock(){clearTimeout(saveT);saveT=setTimeout(()=>{const o={};stockCache.forEach((v,k)=>{if(Date.now()-v.at<STOCK_TTL)o[k]=v});store.set('stock',o)},1000)}
-async function stockOf(id,signal){
-  const c=stockCache.get(id);if(c&&Date.now()-c.at<STOCK_TTL)return c.s;
-  const body=new URLSearchParams({citycode:CITY,townCode:TOWN,cartPage:'false',entryNumber:'0',latitude:'',longitude:'',isAvailableStores:'true',isFindInStore:'true'});
+async function stockOf(id,signal){return (await stockInfo(id,signal)).s}
+// one request returns every Ankara store that has the product, with its unit count (stockLevel)
+async function stockInfo(id,signal,fresh){
+  const c=stockCache.get(id);if(!fresh&&c&&Date.now()-c.at<STOCK_TTL)return c;
+  const body=new URLSearchParams({citycode:CITY,townCode:'',cartPage:'false',entryNumber:'0',latitude:'',longitude:'',isAvailableStores:'true',isFindInStore:'true'});
   // Teknosa answers this request only with the session's CSRF token; without it an HTML page comes back
   let j=null;
   for(let a=0;a<2&&!j;a++){
@@ -302,7 +321,10 @@ async function stockOf(id,signal){
   const s=(j.data||[]).find(x=>String(x.name)===STORE_CODE);
   const ss=s?String(s.storeStockStatus||''):'';// Panora listed: inStock -> var; runningOut/low -> az kaldı (marketplace-only items are forced to 'none' later)
   const st=!s?'none':(ss==='inStock'?'inStock':(/low|runningOut|few/i.test(ss)?'lowStock':'none'));
-  stockCache.set(id,{s:st,at:Date.now()});saveStock();return st;
+  const qty=v=>{const n=parseInt(v,10);return isNaN(n)?null:n};
+  const others=(j.data||[]).filter(x=>String(x.name)!==STORE_CODE).map(x=>({n:String(x.displayName||'').replace(/^ANKARA\s+/i,''),s:x.storeStockStatus,q:qty(x.stockLevel)})).filter(o=>o.q===null||o.q>0);
+  const info={s:st,q:s?qty(s.stockLevel):0,others,at:Date.now()};
+  stockCache.set(id,info);saveStock();return info;
 }
 const offerCache=new Map();
 async function teknosaOffer(x,signal){ // finds the TEKNOSA seller's price on the product page
@@ -335,12 +357,13 @@ async function specsOf(id){
 }
 
 /* ---------- tabs ---------- */
-function show(name){['ara','kiyas'].forEach(n=>{$('#view-'+n).hidden=n!==name;$('#tab-'+n).setAttribute('aria-selected',n===name)});window.scrollTo(0,0)}
+function show(name){['ara','kod','kiyas'].forEach(n=>{$('#view-'+n).hidden=n!==name;$('#tab-'+n).setAttribute('aria-selected',n===name)});window.scrollTo(0,0)}
 $('#tab-ara').onclick=()=>show('ara');
 $('#tab-kiyas').onclick=()=>show('kiyas');
+$('#tab-kod').onclick=()=>{show('kod');setTimeout(()=>$('#codeIn').focus(),50)};
 window.panoraBack=function(){ // called by Android back button; return true if handled
   if(!$('#sheet').hidden){$('#sheet').hidden=true;return true}
-  if(!$('#view-kiyas').hidden){show('ara');return true}
+  if(!$('#view-kiyas').hidden||!$('#view-kod').hidden){show('ara');return true}
   if(openId){openId=null;renderList();return true}
   if(q.value){q.value='';onQuery();return true}
   return false;
@@ -367,7 +390,8 @@ function hl(name){
   marks.forEach(([a,b])=>{if(a<p)return;r+=esc(name.slice(p,a))+'<mark>'+esc(name.slice(a,b))+'</mark>';p=b});return r+esc(name.slice(p));
 }
 function card(x){
-  const st=x.st||'wait';const [cls,lbl]=ST[st];const open=openId===x.id;
+  const st=x.st||'wait';const [cls,lbl0]=ST[st];const open=openId===x.id;
+  const ci=stockCache.get(x.id);const lbl=lbl0+((st==='inStock'||st==='lowStock')&&ci&&ci.q>0?` · ${ci.q} adet`:'');
   const inS=st==='inStock'||st==='lowStock';
   // a product counts only if TEKNOSA sells it; marketplace-only items are shown just as 'not in store' when they match the search exactly
   const hide=(onlyIn.checked&&st==='none')||(!x.tk&&!(x.nt&&exact(x)));
@@ -578,7 +602,7 @@ const AI={
     for(let i=0;i<Math.min(order.length,4);i++){
       const m=order[i];if(i&&onStatus)onStatus(`Yoğunluk var, başka modelle deneniyor (${m})…`);
       for(const thinkOff of [true,false]){
-        const gc={temperature:0.5,maxOutputTokens:1400};if(thinkOff&&/2\.5-flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
+        const gc={temperature:0.7,maxOutputTokens:2000};if(thinkOff&&/2\.5-flash/.test(m))gc.thinkingConfig={thinkingBudget:0};
         let r;
         try{r=await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:'POST',
           headers:{'x-goog-api-key':this.key(),'Content-Type':'application/json'},
@@ -606,8 +630,13 @@ async function aiErr(r){
   if(r.status===404){try{localStorage.removeItem('pra_gmodels')}catch(e){}return new Error('Model bulunamadı, tekrar dene.')}
   return new Error('Yapay zekâya ulaşılamadı ('+r.status+').');
 }
-const AI_RULES=`Sen Teknosa Ankara Panora mağazasında çalışan bir satış danışmanının yardımcısısın. Danışman cevabını telefondan okuyup müşteriye kendi ağzıyla anlatacak.
-Kurallar: Türkçe yaz. Samimi, doğal konuşma dili kullan, broşür gibi değil. Kısa tut. Sana verilmeyen bilgiyi uydurma; emin olmadığın teknik değer yazma. Başlıkları "## " ile, maddeleri "- " ile yaz; başka biçimlendirme kullanma.`;
+const AI_RULES=`Sen Teknosa Ankara Panora mağazasının en iyi satış danışmanısın; yıllardır müşteriyle yüz yüze satış yapıyorsun. Mağazadaki bir arkadaşın müşterinin yanında telefonuna bakıp senin yazdığını kendi ağzıyla söyleyecek.
+Nasıl yazarsın:
+- Müşteriyle konuşur gibi: "siz" diye hitap, kısa ve net cümleler, günlük Türkçe. Broşür, reklam ya da madde madde teknik liste dili YOK.
+- Her özelliği müşterinin hayatına çevir: özellik → ona ne kazandırır → somut bir an ("akşam eve geldiğinizde şarj hâlâ %30'da olur" gibi). Somut, gözünde canlanan örnekler ver.
+- Genel geçer laf yazma ("kaliteli", "harika bir ürün", "ihtiyaçlarınıza uygun" gibi boş ifadeler yasak). Her cümle bu ürüne ya da bu müşteriye özel olsun.
+- Dürüst ol: sana verilmeyen değeri, kampanyayı, fiyatı uydurma. Bilmediğin bir şeyi yazma. Abartma; küçük farkları büyük göstermeme.
+- Biçim: başlıkları "## " ile, maddeleri "- " ile yaz; önemli tek bir ifadeyi **kalın** yazabilirsin. Başka biçim kullanma, giriş/sonuç cümlesi ekleme.`;
 function md(t){ // tiny formatter for the AI answer: ## headings, - bullets, **bold**
   const lines=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').split('\n');let h='',inUl=false;
   for(const l of lines){const m=l.match(/^\s*[-•*]\s+(.*)/);
@@ -654,62 +683,73 @@ function renderTG(box,x){
   box.querySelector('[data-tgnote]').onclick=e=>e.stopPropagation();
   aiBlock(box.querySelector('[data-tgai]'),'Yapay zekâ ile anlatım hazırla',()=>`${AI_RULES}
 
-Görev: Danışmanın bu müşteriye TeknoGaranti/ek garanti paketlerini anlatmasına yardım et. FİYAT YAZMA (mağaza fiyatları internetten farklı, fiyatı danışman söyleyecek). Sadece bu ürüne uygun paketleri öner; kapsam dışı bir şeyi kapsıyor gibi anlatma, koşulları dürüstçe hatırlat.
+GÖREV: Arkadaşın bu müşteriye garanti paketi satmak istiyor. Ona müşterinin yanında okuyacağı, ikna edici ama dürüst bir konuşma hazırla.
+- FİYAT RAKAMI YAZMA (mağaza fiyatı internetten farklı; rakamı arkadaşın söyleyecek). "Günlük bir çay parası" gibi rakamsız benzetmeler kullanabilirsin.
+- Bu ürünün GERÇEK risklerini anlat: ${({phone:'elden kayma, ekran çatlaması, suya/çaya düşme, cepte büküm',tablet:'çocuğun elinden düşme, ekran çatlaması, çantada ezilme',watch:'sporda çarpma, ekran çizilmesi/kırılması',laptop:'çantada taşırken düşme, klavyeye sıvı dökülmesi, menteşe/ekran kırılması',tv:'elektrik dalgalanması ve yıldırım, çocukların ekrana bir şey çarpması, garanti bittikten sonra panel/anakart arızası',home:'garanti bittikten sonra çıkan arızalar, voltaj dalgalanması, nem',printer:'yoğun kullanımda mekanik aşınma, voltaj dalgalanması',audio:'düşme, ter ve sıvı teması',other:'kaza, sıvı teması ve garanti sonrası arızalar'})[ck]}. Müşterinin durumuna göre en olası 1-2 senaryoyu seç ve canlı anlat.
+- Normal üretici garantisinin neyi KAPSAMADIĞINI net söyle (kaza, kırılma, sıvı, voltaj) — insanlar bunu çoğu zaman bilmiyor, en güçlü argüman bu.
+- Bu ürüne uygun olmayan paketi önerme. Kapsamı abartma; %65 sınırını ve hırsızlık koşulunu gerektiğinde dürüstçe söyle.
+
 Ürün: ${x.n}
-Kategori: ${x.c}
+Kategori: ${x.c||'-'}
 Müşterinin durumu: ${[...sel].join(', ')||'belirtilmedi'}
 Müşterinin söylediği: ${box.querySelector('[data-tgnote]').value.trim()||'-'}
 
 ${TG_FACTS}
 
-Şu başlıklarla yaz:
+ÇIKTI (bu başlıklarla, toplam 200 kelimeyi geçmesin):
 ## Önerilen paket
-(tek cümle: hangi paket ve neden bu müşteriye uygun)
+(tek cümle: hangi paket ve bu müşteri için neden)
 ## Müşteriye söyle
-(2-4 cümle, bu ürünün gerçek risklerine ve müşterinin durumuna özel, konuşur gibi)
+(3-5 kısa cümle: somut bir "başınıza gelirse" senaryosu + garantinin bunu karşılamadığı + paketin bunu nasıl çözdüğü + içini rahatlatan bir cümle)
 ## Kapanış
-(tek cümle)
+(tek cümle, evet demesi kolay bir soru; ör. "Faturaya ekleyeyim mi, bugünden itibaren korumada olsun?")
 ## İtiraz gelirse
-- "Zaten garantisi var" → cevap
-- "Pahalı" → cevap (fiyat rakamı yazmadan)
-- "Sonra alırım" → cevap
-- bu ürüne özel bir itiraz daha → cevap`);
+- "Zaten garantisi var" → kısa, net cevap
+- "Pahalı" → rakam vermeden değer odaklı cevap
+- "Düşüneyim / sonra alırım" → cevap
+- bu müşteriden gelebilecek bir itiraz daha → cevap
+
+ÖRNEK TON (kopyalama, sadece tonu gör): "Telefonu çoğu kişi bir kere elinden düşürür, genelde de ekran üstü gelir. Normal garanti bunu 'kullanıcı hatası' sayıyor, tamir parası sizden çıkıyor. TeknoGaranti'yle ilk yıl ekran, sıvı, düşme hepsi kapsamda; servise bırakıyorsunuz, gerisini biz hallediyoruz."`);
 }
 function specsPrompt(x,sp){return `${AI_RULES}
 
-Görev: Aşağıdaki ürünün teknik özelliklerini müşteriye anlatılacak şekilde açıkla. Sadece listedeki değerleri kullan.
-Ürün: ${x.n} — ${x.c}${x.p?` — Teknosa fiyatı ${TL(x.p)}`:''}
+GÖREV: Müşteri bu ürünü inceliyor. Arkadaşına, teknik tabloyu müşterinin anlayacağı ve ürünü isteyeceği şekilde anlatmasına yardım et. Sadece aşağıdaki değerleri kullan; listede olmayan bir özelliği varmış gibi yazma.
+Ürün: ${x.n}${x.c?` (${x.c})`:''}${x.p?` — Teknosa fiyatı ${TL(x.p)}`:''}
 Özellikler:
 ${sp.map(s=>`- ${s.k}: ${s.v}`).join('\n')}
 
-Şu başlıklarla yaz:
-## Kısaca
-(1-2 cümle: bu ürün ne, kime uygun)
-## Öne çıkan 4-5 özellik
-- özellik: müşteriye ne kazandırır (teknik terimi basitçe açıkla)
-## Dikkat edilecekler
-- bu üründe olmayan ya da sınırlı olan, müşterinin sorabileceği 1-3 nokta
+ÇIKTI (bu başlıklarla, toplam 220 kelimeyi geçmesin):
+## Tek cümlede
+(bu ürün kimin için ve en büyük artısı ne)
+## Öne çıkanlar
+- 4 madde: **değer** → müşteriye günlük hayatta ne kazandırır (somut an). Teknik terimleri basitçe açıkla (ör. "120 Hz: kaydırırken daha akıcı görüntü").
+## Sorulursa
+- müşterinin sorabileceği ya da bu üründe zayıf/sınırlı olan 1-3 nokta ve dürüst kısa cevap
 ## Müşteriye söyle
-(2-3 cümle, konuşur gibi)`}
+(3 cümle, konuşur gibi; sonunda müşteriyi denemeye/karar vermeye davet eden bir soru)`}
 function cmpPrompt(prods,specs,stocks){
   const keys=[];const seen=new Set();specs.forEach(sp=>sp.forEach(s=>{if(!seen.has(s.k)){seen.add(s.k);keys.push(s.k)}}));
   const rows=keys.map(k=>`- ${k}: ${prods.map((p,i)=>{const f=specs[i].find(s=>s.k===k);return `${'ABC'[i]}=${f?f.v:'?'}`}).join(' | ')}`).join('\n');
   return `${AI_RULES}
 
-Görev: Müşteri bu ürünler arasında kararsız. Danışmana hangi ürünün kime daha uygun olduğunu anlat. Sadece verilen değerleri kullan; sayısal fark önemsizse abartma (ör. 4 g ağırlık farkı).
+GÖREV: Müşteri bu ürünler arasında kararsız. Arkadaşının müşteriyi doğru ürüne yönlendirmesine yardım et: net bir öneri ver, fiyat farkını haklı çıkar ya da gereksizse söyle.
+- Sadece verilen değerleri kullan. Önemsiz farkları (birkaç gram, küçük oran farkı) öne çıkarma; günlük kullanımda hissedilecek farklara odaklan.
+- Panora'da stokta olmayan ürünü önerme; öyleyse stoktakine yönlendir.
 ${prods.map((p,i)=>`${'ABC'[i]}: ${p.n} — fiyat ${p.p?TL(p.p):'bilinmiyor'} — Panora stok: ${({inStock:'var',lowStock:'az kaldı',none:'yok',err:'bilinmiyor'})[stocks[i]]||'bilinmiyor'}`).join('\n')}
-Özellikler (A | B${prods.length>2?' | C':''}):
+Özellikler (${prods.map((_,i)=>'ABC'[i]).join(' | ')}):
 ${rows}
 
-Şu başlıklarla yaz:
-## Kısaca
-(2 cümle: temel fark ve fiyat farkı neye karşılık geliyor)
+ÇIKTI (bu başlıklarla, toplam 230 kelimeyi geçmesin):
+## Önce sor
+(müşterinin ihtiyacını netleştiren tek bir soru)
+## Kısa cevap
+(2 cümle: aradaki fiyat farkı neye karşılık geliyor; değer mi, değmez mi)
 ## Hangisi kime
-- ${prods.map((_,i)=>'ABC'[i]).join(' / ')}: kime uygun, tek cümle
-## Gerçekten önemli farklar
-- en fazla 4 madde
+- ${prods.map((_,i)=>'ABC'[i]).join(' / ')}: kime uygun, somut kullanım örneğiyle tek cümle
+## Hissedilecek farklar
+- en fazla 4 madde, her biri "günlük hayatta şu demek" şeklinde
 ## Müşteriye söyle
-(2-3 cümle, konuşur gibi, stokta olmayan ürünü önerme)`;
+(3 cümle, konuşur gibi, net bir öneriyle bitsin)`;
 }
 function renderList(){
   const box=$('#results');
@@ -740,7 +780,7 @@ function updCount(){
   const vis=document.querySelectorAll('.item:not(.hide)').length;
   if(!vis&&!pend&&list.length&&!$('#noin')){$('#results').insertAdjacentHTML('beforeend',`<div class="empty" id="noin"><strong>${onlyIn.checked?'Bu sonuçlarda Panora’da olan yok':'Bu sonuçlarda satıcısı Teknosa olan ürün yok'}</strong><span>Daha fazla ürün yükle${onlyIn.checked?' ya da filtreyi kapat':''}.</span></div>`)}
 }
-function patch(x){const el=document.querySelector(`.item[data-id="${x.id}"]`);if(el)el.outerHTML=card(x);const n=$('#noin');if(n)n.remove();updCount();if(x.st==='wait')watchStock()}
+function patch(x){document.querySelectorAll(`.item[data-id="${x.id}"]`).forEach(el=>{el.outerHTML=card(x)});const n=$('#noin');if(n)n.remove();updCount();if(x.st==='wait')watchStock()}
 const stockQ=[];let stockBusy=0;
 const io=('IntersectionObserver' in window)?new IntersectionObserver(es=>{es.forEach(e=>{if(!e.isIntersecting)return;io.unobserve(e.target);const x=list.find(y=>y.id===e.target.dataset.id);if(x&&x.st==='wait'&&!stockQ.includes(x))stockQ.push(x)});pumpStock()},{rootMargin:'200px'}):null;
 function watchStock(){document.querySelectorAll('.item[data-id]').forEach(el=>{const x=list.find(y=>y.id===el.dataset.id);if(x&&x.st==='wait'&&!el.classList.contains('hide')){if(io)io.observe(el);else if(!stockQ.includes(x))stockQ.push(x)}});if(!io)pumpStock()}
@@ -793,8 +833,9 @@ function renderRecent(){const r=store.get('recent',[]);$('#recent').hidden=!r.le
 $('#recent').addEventListener('click',e=>{const b=e.target.closest('[data-i]');if(!b)return;q.value=store.get('recent',[])[+b.dataset.i]||'';$('#clr').hidden=false;clearTimeout(deb);term=q.value.trim();runSearch(false)});
 renderRecent();
 
-$('#results').addEventListener('click',async e=>{
-  const it=e.target.closest('.item');if(!it)return;const x=list.find(y=>y.id===it.dataset.id);if(!x)return;
+let codeItems=[];const findItem=id=>list.find(y=>y.id===id)||codeItems.find(y=>y.id===id);
+async function itemClick(e){
+  const it=e.target.closest('.item');if(!it)return;const x=findItem(it.dataset.id);if(!x)return;
   const act=e.target.closest('[data-act]');
   if(act&&act.dataset.act==='cmp'){addToCompare(x);return}
   if(act&&act.dataset.act==='web'){location.href='https://www.teknosa.com'+x.u;return}
@@ -816,7 +857,47 @@ $('#results').addEventListener('click',async e=>{
     return;
   }
   if(e.target.closest('.item>button')){const prev=openId;openId=openId===x.id?null:x.id;if(prev&&prev!==x.id){const py=list.find(y=>y.id===prev);if(py)patch(py)}it.outerHTML=card(x)}
-});
+}
+$('#results').addEventListener('click',itemClick);
+$('#codeResult').addEventListener('click',itemClick);
+
+/* ---------- lookup by product code ---------- */
+async function lookupCode(code){
+  const box=$('#codeResult');
+  if(!/^\d{6,14}$/.test(code)){box.innerHTML='<p class="note">Ürün kodu sadece rakamlardan oluşmalı (ör. 100000065149).</p>';return}
+  box.innerHTML='<div class="loading"><span class="spin"></span>Ürün aranıyor…</div>';$('#codeGo').disabled=true;
+  try{
+    let x=null;
+    try{const r=await parseSearch(code,0);x=r.items.find(i=>i.id===code)||null}catch(e){}
+    if(!x){ // not in search results (e.g. delisted online): fall back to the product description
+      try{const r=await tk('/getProductDescriptions?productCode='+code,{headers:{'X-Requested-With':'XMLHttpRequest'}});const j=await r.json();
+        if(j&&j.name)x={id:code,n:j.name,b:'',c:'',leaf:'',p:0,o:0,tk:true,u:(j.url||'')+'?shopId=teknosa'}}catch(e){}
+    }
+    if(!x){box.innerHTML=`<div class="empty"><strong>${esc(code)} kodlu ürün bulunamadı</strong><span>Kodu kontrol et. Teknosa sitesinde olmayan ürünler burada görünmez.</span></div>`;return}
+    const info=await stockInfo(code,null,true);
+    x.st=info.s;x.nt=false;codeItems=[x];openId=x.id;
+    const big=info.s==='inStock'||info.s==='lowStock';
+    box.innerHTML=`<div style="display:grid;gap:12px">
+      <div class="panel" style="text-align:center;gap:4px;${big?'border-color:var(--good)':''}">
+        <h3>Ankara Panora Extra</h3>
+        <div style="font-family:var(--f-display);font-size:44px;font-weight:700;line-height:1.1;color:${big?'var(--good)':'var(--no)'}">${big?(info.q!=null?info.q+' adet':'Var'):'Yok'}</div>
+        <span class="st ${ST[info.s][0]}" style="justify-self:center">${ST[info.s][1]}</span>
+        ${!x.tk?'<span class="muted" style="font-size:12px">Bu ürünü sitede Teknosa satmıyor.</span>':''}
+      </div>
+      <div class="results codeview" style="padding:0">${card(x)}</div>
+      <div class="panel" style="gap:6px"><h3>Diğer Ankara mağazaları</h3>
+        ${info.others.length?`<ul class="diffs">${info.others.map(o=>`<li>${esc(o.n)}: <b>${o.q!=null?o.q+' adet':'var'}</b>${/runningOut|low/i.test(o.s)?' (az)':''}</li>`).join('')}</ul>`:'<p class="muted" style="font-size:14px">Ankara’daki diğer mağazalarda stok görünmüyor.</p>'}
+      </div>
+      <p class="muted" style="font-size:12px">Adetler Teknosa’nın stok sisteminden, ${new Date().toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'})} itibarıyla. Teşhir ya da ayrılmış ürünler de sayılmış olabilir.</p></div>`;
+    let h=store.get('codes',[]).filter(c=>c.code!==code);h.unshift({code,n:x.n,at:Date.now()});store.set('codes',h.slice(0,10));renderCodeHist();
+  }catch(e){box.innerHTML=`<div class="empty"><strong>Sorgulanamadı</strong><span>${e.message==='429'||e.message==='cooldown'?'Teknosa yavaşlamamızı istedi, birazdan tekrar dene.':'İnternet bağlantını kontrol edip tekrar dene.'}</span></div>`}
+  finally{$('#codeGo').disabled=false}
+}
+$('#codeForm').addEventListener('submit',e=>{e.preventDefault();const c=$('#codeIn').value.replace(/\D/g,'');$('#codeIn').value=c;$('#codeIn').blur();lookupCode(c)});
+function renderCodeHist(){const h=store.get('codes',[]);$('#codeHistWrap').hidden=!h.length;
+  $('#codeHist').innerHTML=h.map((c,i)=>`<button data-c="${i}" type="button"><span><span class="code">${esc(c.code)}</span><br>${esc(c.n.slice(0,48))}</span><small>${new Date(c.at).toLocaleDateString('tr-TR',{day:'2-digit',month:'2-digit'})}</small></button>`).join('')}
+$('#codeHist').addEventListener('click',e=>{const b=e.target.closest('[data-c]');if(!b)return;const c=store.get('codes',[])[+b.dataset.c];if(!c)return;$('#codeIn').value=c.code;lookupCode(c.code);window.scrollTo(0,0)});
+renderCodeHist();
 
 /* ---------- compare ---------- */
 let slots=store.get('slots',[]);
